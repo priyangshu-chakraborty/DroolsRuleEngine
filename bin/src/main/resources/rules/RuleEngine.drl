@@ -1,0 +1,185 @@
+package rules
+
+import com.example.validationengine.entity.CanonicalTrade;
+import com.example.validationengine.dto.ValidationResult;
+
+global java.time.LocalTime navCutoffTime;
+global java.lang.Double minimumInvestmentAmount;
+global java.lang.String requestId;
+global java.util.Map fundData;
+global java.util.Map clientData;
+
+rule "Mandatory Fields Validation"
+when
+    $ct : CanonicalTrade(
+        originatorType == null ||
+        transactionType == null || transactionType.trim().isEmpty() ||
+        transactionId == null || transactionId.trim().isEmpty() ||
+        clientName == null || clientName.trim().isEmpty() ||
+        firmNumber == null ||
+        fundNumber == null ||
+        clientAccountNo == null ||
+        tradeDateTime == null ||
+        dob == null 
+    )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Mandatory fields missing or empty.")) )
+then
+    $res.addError("Mandatory fields missing or empty.");
+    update($res);
+end
+
+rule "Cutoff Time Validation"
+when
+    $ct : CanonicalTrade( tradeDateTime != null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Order received after NAV cut-off")) )
+then
+    java.time.LocalDateTime dt = $ct.getTradeDateTime();
+    java.time.LocalTime orderTime = (dt != null) ? dt.toLocalTime() : null;
+    java.time.LocalTime compareTime = (orderTime != null) ? orderTime : java.time.LocalTime.now();
+
+    if (compareTime.isAfter(navCutoffTime)) {
+        $res.addError("Order received after NAV cut-off; will be processed for next day's NAV.");
+        update($res);
+    }
+end
+
+rule "Transaction Type Validation "
+when
+    $ct : CanonicalTrade( transactionType != null && !(transactionType in ("B","S","E")) )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Transaction type")) )
+then
+    $res.addError("Transaction type '" + $ct.getTransactionType() + "' is not permitted for this scheme.");
+    update($res);
+end
+
+rule "Unknown Client "
+when
+    $ct : CanonicalTrade( clientAccountNo != null )
+    eval( clientData.get($ct.getClientAccountNo()) == null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Unknown client.")) )
+then
+    $res.addError("Unknown client.");
+    update($res);
+end
+
+rule "Scheme Eligibility - KYC "
+when
+    $ct : CanonicalTrade( clientAccountNo != null )
+    eval( clientData.get($ct.getClientAccountNo()) != null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Investor KYC not valid for scheme"))) 
+then
+    java.util.Map client = (java.util.Map) clientData.get($ct.getClientAccountNo());
+    String kyc = client == null ? null : (String) client.get("kyc_status");
+    if (kyc == null || !"YES".equalsIgnoreCase(kyc)) {
+        $res.addError("Investor KYC not valid for scheme (DB).");
+        update($res);
+    }
+end
+
+rule "Unknown Fund Scheme "
+when
+    $ct : CanonicalTrade( fundNumber != null )
+    eval( fundData.get($ct.getFundNumber()) == null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Unknown scheme/fund.")) )
+then
+    $res.addError("Unknown scheme/fund.");
+    update($res);
+end
+
+rule "Fund Scheme Status Validation "
+when
+    $ct : CanonicalTrade( fundNumber != null )
+    eval( fundData.get($ct.getFundNumber()) != null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Scheme not open for transactions.")) )
+then
+    java.util.Map fund = (java.util.Map) fundData.get($ct.getFundNumber());
+    String fstatus = fund == null ? null : (String) fund.get("status");
+    if (fstatus == null || !"ACTIVE".equalsIgnoreCase(fstatus)) {
+        $res.addError("Scheme not open for transactions.");
+        update($res);
+    }
+end
+
+rule "Fund Limits Validation (min/max) "
+when
+    $ct : CanonicalTrade( fundNumber != null, dollarAmount != null )
+    eval( fundData.get($ct.getFundNumber()) != null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Order amount out of allowed scheme limits.")) )
+then
+    java.util.Map fund = (java.util.Map) fundData.get($ct.getFundNumber());
+    java.lang.Number minN = fund == null ? null : (java.lang.Number) fund.get("min_limit");
+    java.lang.Number maxN = fund == null ? null : (java.lang.Number) fund.get("max_limit");
+
+    double min = (minN != null) ? minN.doubleValue() : Double.NEGATIVE_INFINITY;
+    double max = (maxN != null) ? maxN.doubleValue() : Double.POSITIVE_INFINITY;
+    double amt = $ct.getDollarAmount() != null ? $ct.getDollarAmount().doubleValue() : Double.NaN;
+
+    if (Double.isNaN(amt) || amt < min || amt > max) {
+        $res.addError("Order amount out of allowed scheme limits. (allowed: " + min + " - " + max + ")");
+        update($res);
+    }
+end
+
+rule "Client Account Status Validation "
+when
+    $ct : CanonicalTrade( clientAccountNo != null )
+    eval( clientData.get($ct.getClientAccountNo()) != null )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("Investor account not active.")) )
+then
+    java.util.Map client = (java.util.Map) clientData.get($ct.getClientAccountNo());
+    String cstatus = client == null ? null : (String) client.get("status");
+    if (cstatus == null || !"ACTIVE".equalsIgnoreCase(cstatus)) {
+        $res.addError("Investor account not active.");
+        update($res);
+    }
+end
+
+rule "BUY requires amount only"
+when
+    $ct : CanonicalTrade( transactionType != null && transactionType == "B" )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("BUY")) )
+then
+    boolean hasAmount = $ct.getDollarAmount() != null;
+    boolean hasQty = $ct.getShareQuantity() != null;
+
+    if (!hasAmount) {
+        $res.addError("BUY order requires amount.");
+        update($res);
+    }
+    if (hasQty) {
+        $res.addError("BUY order cannot have quantity.");
+        update($res);
+    }
+end
+
+rule "SELL requires quantity only"
+when
+    $ct : CanonicalTrade( transactionType != null && transactionType == "S" )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("SELL")) )
+then
+    boolean hasAmount = $ct.getDollarAmount() != null;
+    boolean hasQty = $ct.getShareQuantity() != null;
+
+    if (!hasQty) {
+        $res.addError("SELL order requires quantity.");
+        update($res);
+    }
+    if (hasAmount) {
+        $res.addError("SELL order cannot have amount.");
+        update($res);
+    }
+end
+
+rule "SWITCH requires amount and quantity"
+when
+    $ct : CanonicalTrade( transactionType != null && transactionType == "E" )
+    $res : ValidationResult( this != null, eval(!$res.getErrors().toString().contains("SWITCH")) )
+then
+    boolean hasAmount = $ct.getDollarAmount() != null;
+    boolean hasQty = $ct.getShareQuantity() != null;
+
+    if (!hasAmount || !hasQty) {
+        $res.addError("SWITCH order requires BOTH amount and quantity.");
+        update($res);
+    }
+end

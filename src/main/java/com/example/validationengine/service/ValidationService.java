@@ -1,16 +1,11 @@
 package com.example.validationengine.service;
 
-
-import com.example.validationengine.dto.ClientDTO;
-import com.example.validationengine.dto.FundDTO;
 import com.example.validationengine.dto.ValidationResult;
 import com.example.validationengine.entity.Fund;
-import com.example.validationengine.entity.OutboxEntity;
 import com.example.validationengine.repository.CanonicalTradeRepository;
 import com.example.validationengine.entity.CanonicalTrade;
 import com.example.validationengine.entity.Client;
 import com.example.validationengine.repository.FundRepository;
-import com.example.validationengine.repository.OutboxRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import jakarta.transaction.Transactional;
@@ -22,21 +17,20 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
 import java.time.LocalTime;
-import java.util.HashMap;
 import java.util.List;
-import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 @Service
 public class ValidationService {
 
     @Autowired
     private RuleEngineService ruleEngineService;
-
+    
     @Autowired
-    private OutboxRepository outboxRepository;
+    private OutboxService outboxService;
 
     @Autowired
     private CanonicalTradeRepository canonicalTradeRepository;
@@ -115,31 +109,39 @@ public class ValidationService {
     }
 
 
-    
     @Transactional
     public void storeValidOrders(CanonicalTrade trade) {
+    	/*
+    	// Check if order already exists
+        boolean tradeExists = canonicalTradeRepository.existsByFileIdAndOrderId(
+                trade.getFileId(),
+                trade.getOrderId()
+        );
 
-        CanonicalTrade saved = canonicalTradeRepository.save(trade);
-
-        // Convert saved trade to JSON for outbox payload
-        final String payloadJson;
-        try {
-            payloadJson = objectMapper.writeValueAsString(saved);
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to convert trade to JSON", e);
+        if (tradeExists) {
+            throw new RuntimeException(
+                "Duplicate trade found for fileId=" + trade.getFileId() +
+                ", orderId=" + trade.getOrderId()
+            );
         }
+        */
 
-        OutboxEntity outbox = new OutboxEntity();
+        // Save trade if duplicate not found (entity itself has composite key unique constraint)
+        CanonicalTrade savedTrade = canonicalTradeRepository.save(trade);
+        outboxService.createOutboxEntry(savedTrade);
 
-        outbox.setAggregateId(saved.getId());
-        outbox.setPayload(payloadJson);
-        outbox.setStatus("ARRIVED");
-        outbox.setCreatedAt(LocalDateTime.now());
-        outbox.setRetryCount(0);
-        outbox.setLastAttemptAt(null);
-
-        outboxRepository.save(outbox);
     }
+    
+    // Batch processing to improve performance
+    @Transactional
+    public void storeValidOrdersBatch(List<CanonicalTrade> trades) {
+        // Batch insert all valid trades
+        List<CanonicalTrade> savedTrades = canonicalTradeRepository.saveAll(trades);
+
+        // Create outbox entries IN BULK
+        outboxService.createOutboxEntries(savedTrades);
+    }
+
 
     // private void setFundAndClientGlobals(KieSession kieSession) {
     //     // load all funds

@@ -8,13 +8,20 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.UUID;
 
+import org.hibernate.annotations.BatchSize;
+
 @Data
 @Entity
+@BatchSize(size = 100)
 @Table(name = "canonical_trades", indexes = {
     @Index(name = "idx_transaction_id", columnList = "transaction_id"),
     @Index(name = "idx_trade_datetime", columnList = "trade_datetime"),
     @Index(name = "idx_client_account", columnList = "client_account_no")
-})
+},
+uniqueConstraints = {
+        @UniqueConstraint(columnNames = {"file_id", "order_id"})
+    }
+)
 public class CanonicalTrade {
 
     @Id
